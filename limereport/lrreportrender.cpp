@@ -1,4 +1,4 @@
-/***************************************************************************
+﻿/***************************************************************************
  *   This file is part of the Lime Report project                          *
  *   Copyright (C) 2015 by Alexander Arin                                  *
  *   arin_a@bk.ru                                                          *
@@ -189,10 +189,45 @@ void ReportRender::initDatasource(const QString& name){
     }
 }
 
+void ReportRender::analizeItem(ContentItemDesignIntf* contentItem, BandDesignIntf* band){
+    if (contentItem){
+        QString content = contentItem->content();
+        QVector<QString> functions;
+        foreach(const QString &functionName, m_datasources->groupFunctionNames()){
+            QRegExp rx(QString(Const::GROUP_FUNCTION_RX).arg(functionName));
+            rx.setMinimal(true);
+            if (rx.indexIn(content)>=0){
+                functions.append(functionName);
+            }
+        }
+        if (functions.size()>0)
+            m_groupfunctionItems.insert(contentItem->patternName(), functions);
+    }
+}
+
+void ReportRender::analizeContainer(BaseDesignIntf* item, BandDesignIntf* band){
+    foreach(BaseDesignIntf* child, item->childBaseItems()){
+        ContentItemDesignIntf* contentItem = dynamic_cast<ContentItemDesignIntf*>(child);
+        if (contentItem) analizeItem(contentItem, band);
+        else analizeContainer(child, band);
+    }
+}
+
+void ReportRender::analizePage(PageItemDesignIntf* patternPage){
+    m_groupfunctionItems.clear();
+    foreach(BandDesignIntf* band, patternPage->bands()){
+        if (band->isFooter() || band->isHeader()){
+            analizeContainer(band,band);
+        }
+    }
+}
+
 void ReportRender::renderPage(PageItemDesignIntf* patternPage, bool isTOC, bool /*isFirst*/, bool /*resetPageNumbers*/)
 {
     m_currentNameIndex = 0;
     m_patternPageItem = patternPage;
+
+    analizePage(patternPage);
 
     if (m_patternPageItem->resetPageNumber() && m_pageCount>0 && !isTOC) {
         resetPageNumber(PageReset);
@@ -380,33 +415,34 @@ void ReportRender::extractGroupFunctions(BandDesignIntf *band)
     extractGroupFunctionsFromContainer(band, band);
 }
 
-
 void ReportRender::replaceGroupFunctionsInItem(ContentItemDesignIntf* contentItem, BandDesignIntf* band){
     if (contentItem){
-        QString content = contentItem->content();
-        foreach(const QString &functionName, m_datasources->groupFunctionNames()){
-            QRegExp rx(QString(Const::GROUP_FUNCTION_RX).arg(functionName));
-            rx.setMinimal(true);
-            if (rx.indexIn(content)>=0){
-                int pos = 0;
-                while ( (pos = rx.indexIn(content,pos))!= -1 ){
-                    QVector<QString> captures = normalizeCaptures(rx);
-                    if (captures.size() >= 3){
-                        QString expressionIndex = datasources()->putGroupFunctionsExpressions(captures.at(Const::VALUE_INDEX));
-                        if (captures.size()<5){
-                            content.replace(captures.at(0),QString("%1(%2,%3)").arg(functionName).arg('"'+expressionIndex+'"').arg('"'+band->objectName()+'"'));
-                        } else {
-                            content.replace(captures.at(0),QString("%1(%2,%3,%4)")
-                                            .arg(functionName)
-                                            .arg('"'+expressionIndex+'"')
-                                            .arg('"'+band->objectName()+'"')
-                                            .arg(captures.at(4)));
+        if (m_groupfunctionItems.contains(contentItem->patternName())){
+            QString content = contentItem->content();
+            foreach(QString functionName, m_groupfunctionItems.value(contentItem->patternName())){
+                QRegExp rx(QString(Const::GROUP_FUNCTION_RX).arg(functionName));
+                rx.setMinimal(true);
+                if (rx.indexIn(content)>=0){
+                    int pos = 0;
+                    while ( (pos = rx.indexIn(content,pos))!= -1 ){
+                        QVector<QString> captures = normalizeCaptures(rx);
+                        if (captures.size() >= 3){
+                            QString expressionIndex = datasources()->putGroupFunctionsExpressions(captures.at(Const::VALUE_INDEX));
+                            if (captures.size()<5){
+                                content.replace(captures.at(0),QString("%1(%2,%3)").arg(functionName).arg('"'+expressionIndex+'"').arg('"'+band->objectName()+'"'));
+                            } else {
+                                content.replace(captures.at(0),QString("%1(%2,%3,%4)")
+                                                .arg(functionName)
+                                                .arg('"'+expressionIndex+'"')
+                                                .arg('"'+band->objectName()+'"')
+                                                .arg(captures.at(4)));
+                            }
                         }
+                        pos += rx.matchedLength();
                     }
-                    pos += rx.matchedLength();
                 }
-                contentItem->setContent(content);
             }
+            contentItem->setContent(content);
         }
     }
 }
@@ -600,10 +636,23 @@ void ReportRender::renderDataBand(BandDesignIntf *dataBand)
             bandDatasource->next();
 
             datasources()->setReportVariable(varName,datasources()->variable(varName).toInt()+1);
-            foreach (BandDesignIntf* band, dataBand->childrenByType(BandDesignIntf::GroupHeader)){
-                QString groupLineVar = QLatin1String("line_")+band->objectName().toLower();
-                if (datasources()->containsVariable(groupLineVar))
-                    datasources()->setReportVariable(groupLineVar,datasources()->variable(groupLineVar).toInt()+1);
+
+            QList<BandDesignIntf *> bandList;
+            QList<BandDesignIntf *> childList;
+
+            bandList = dataBand->childrenByType(BandDesignIntf::GroupHeader);
+            while (bandList.size() > 0)
+            {
+                childList.clear();
+                foreach (BandDesignIntf* band, bandList)
+                {
+                    childList.append(band->childrenByType(BandDesignIntf::GroupHeader));
+
+                    QString groupLineVar = QLatin1String("line_")+band->objectName().toLower();
+                    if (datasources()->containsVariable(groupLineVar))
+                        datasources()->setReportVariable(groupLineVar,datasources()->variable(groupLineVar).toInt()+1);
+                }
+                bandList = childList;
             }
 
             renderGroupHeader(dataBand, bandDatasource, false);
@@ -1134,7 +1183,7 @@ void ReportRender::updateTOC(BaseDesignIntf* item, int pageNumber){
 void ReportRender::secondRenderPass(ReportPages renderedPages)
 {
     if (!m_scriptEngineContext->tableOfContents()->isEmpty()){
-        for(int i=0; i<renderedPages.count(); ++i){
+        for(int i = 0; i < renderedPages.count(); ++i){
             PageItemDesignIntf::Ptr page = renderedPages.at(i);
             updateTOC(page.data(), m_pagesRanges.findPageNumber(i));
             foreach(BaseDesignIntf* item, page->childBaseItems()){
@@ -1143,12 +1192,13 @@ void ReportRender::secondRenderPass(ReportPages renderedPages)
         }
     }
 
-    for(int i=0; i<renderedPages.count(); ++i){
+    for(int i = 0; i < renderedPages.count(); ++i){
         PageItemDesignIntf::Ptr page = renderedPages.at(i);
         m_datasources->setReportVariable("#PAGE",m_pagesRanges.findPageNumber(i));
         m_datasources->setReportVariable("#PAGE_COUNT",m_pagesRanges.findLastPageNumber(i));
         foreach(BaseDesignIntf* item, page->childBaseItems()){
-            item->updateItemSize(m_datasources, SecondPass);
+            if (item->isNeedUpdateSize(SecondPass))
+                item->updateItemSize(m_datasources, SecondPass);
         }
     }
 }
